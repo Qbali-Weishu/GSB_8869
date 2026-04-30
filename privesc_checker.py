@@ -192,8 +192,8 @@ class PrivEscChecker:
                         danger_type = None
                         
                         for dangerous in self.dangerous_suid:
-                            # 使用更精确的匹配：完全匹配或前缀匹配
-                            if base_name == dangerous or base_name.startswith(dangerous + '.'):
+                            # 完全精确匹配命令名
+                            if base_name == dangerous:
                                 is_dangerous = True
                                 danger_type = dangerous
                                 break
