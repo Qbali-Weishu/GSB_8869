@@ -32,6 +32,10 @@ class PrivEscChecker:
             'writable': []
         }
         
+        # 检测操作系统类型
+        self.os_type = self._detect_os()
+        print(f"[*] 检测到操作系统: {self.os_type}")
+        
         # 危险的SUID程序列表
         self.dangerous_suid = [
             'nmap', 'vim', 'vi', 'less', 'more', 'head', 'tail',
@@ -46,75 +50,173 @@ class PrivEscChecker:
             'su', 'sudo', 'pkexec', 'doas'
         ]
         
-        # 可写系统目录列表
-        self.system_dirs = [
-            '/etc', '/usr/bin', '/usr/sbin', '/bin', '/sbin',
-            '/usr/lib', '/usr/lib64', '/lib', '/lib64',
-            '/var/spool/cron', '/etc/cron.d', '/etc/cron.daily',
-            '/etc/cron.hourly', '/etc/cron.weekly', '/etc/cron.monthly',
-            '/boot', '/root', '/home'
-        ]
+        # 根据操作系统设置不同的目录
+        if self.os_type == 'linux':
+            # Linux系统目录
+            self.suid_dirs = [
+                '/bin', '/sbin', '/usr/bin', '/usr/sbin',
+                '/usr/local/bin', '/usr/local/sbin',
+                '/opt', '/usr/gnu/bin'
+            ]
+            
+            self.system_dirs = [
+                '/etc', '/usr/bin', '/usr/sbin', '/bin', '/sbin',
+                '/usr/lib', '/usr/lib64', '/lib', '/lib64',
+                '/var/spool/cron', '/etc/cron.d', '/etc/cron.daily',
+                '/etc/cron.hourly', '/etc/cron.weekly', '/etc/cron.monthly',
+                '/boot', '/root', '/home'
+            ]
+            
+            self.cron_dirs = [
+                '/etc/crontab',
+                '/etc/cron.d',
+                '/etc/cron.daily',
+                '/etc/cron.hourly',
+                '/etc/cron.weekly',
+                '/etc/cron.monthly',
+                '/var/spool/cron',
+                '/var/spool/cron/crontabs'
+            ]
+            
+            self.sudoers_path = '/etc/sudoers'
+            self.sudoers_d_path = '/etc/sudoers.d'
+            
+        elif self.os_type == 'macos':
+            # macOS系统目录
+            self.suid_dirs = [
+                '/bin', '/sbin', '/usr/bin', '/usr/sbin',
+                '/usr/local/bin', '/usr/local/sbin',
+                '/opt', '/Applications'
+            ]
+            
+            self.system_dirs = [
+                '/etc', '/usr/bin', '/usr/sbin', '/bin', '/sbin',
+                '/usr/lib', '/Library', '/System',
+                '/var/at/tabs', '/Library/LaunchDaemons',
+                '/private/etc', '/private/var',
+                '/Users', '/Volumes'
+            ]
+            
+            self.cron_dirs = [
+                '/etc/crontab',
+                '/etc/cron.d',
+                '/usr/lib/cron/tabs',
+                '/var/at/tabs',
+                '/Library/LaunchDaemons',
+                '/Library/LaunchAgents'
+            ]
+            
+            self.sudoers_path = '/etc/sudoers'
+            self.sudoers_d_path = '/etc/sudoers.d'
+            
+        else:
+            # 未知系统，使用默认值
+            self.suid_dirs = [
+                '/bin', '/sbin', '/usr/bin', '/usr/sbin',
+                '/usr/local/bin', '/usr/local/sbin'
+            ]
+            
+            self.system_dirs = [
+                '/etc', '/usr/bin', '/usr/sbin', '/bin', '/sbin',
+                '/usr/lib', '/lib', '/var', '/root', '/home'
+            ]
+            
+            self.cron_dirs = [
+                '/etc/crontab',
+                '/etc/cron.d',
+                '/var/spool/cron'
+            ]
+            
+            self.sudoers_path = '/etc/sudoers'
+            self.sudoers_d_path = '/etc/sudoers.d'
+        
+        # 用于去重的集合
+        self._checked_files = set()
+    
+    def _detect_os(self) -> str:
+        """检测操作系统类型"""
+        system = platform.system().lower()
+        
+        if system == 'linux':
+            return 'linux'
+        elif system == 'darwin':
+            return 'macos'
+        else:
+            return 'unknown'
     
     def check_suid(self) -> List[Dict[str, Any]]:
         """检查SUID程序"""
         print("[*] 检查SUID程序...")
         
-        # 使用find命令查找所有SUID程序
-        try:
-            result = subprocess.run(
-                ['find', '/', '-perm', '-4000', '-type', 'f', '-exec', 'ls', '-la', '{}', ';'],
-                capture_output=True, text=True, timeout=60
-            )
-            lines = result.stdout.strip().split('\n')
-        except Exception as e:
-            print(f"[-] 查找SUID程序失败: {e}")
-            return []
-        
         dangerous_found = []
         
-        for line in lines:
-            if not line:
+        # 只检查常见的SUID目录，避免全盘扫描超时
+        for suid_dir in self.suid_dirs:
+            if not os.path.exists(suid_dir):
                 continue
             
-            parts = line.split()
-            if len(parts) < 9:
+            try:
+                # 使用find命令检查单个目录，设置较短超时
+                result = subprocess.run(
+                    ['find', suid_dir, '-perm', '-4000', '-type', 'f', '-exec', 'ls', '-la', '{}', ';'],
+                    capture_output=True, text=True, timeout=10
+                )
+                lines = result.stdout.strip().split('\n')
+                
+                for line in lines:
+                    if not line:
+                        continue
+                    
+                    parts = line.split()
+                    if len(parts) < 9:
+                        continue
+                    
+                    permissions = parts[0]
+                    owner = parts[2]
+                    file_path = ' '.join(parts[8:])
+                    
+                    # 去重检查
+                    if file_path in self._checked_files:
+                        continue
+                    self._checked_files.add(file_path)
+                    
+                    file_name = os.path.basename(file_path)
+                    
+                    # 检查是否是危险的SUID程序
+                    if owner == 'root':
+                        # 检查程序名是否在危险列表中
+                        base_name = file_name.split('.')[0].lower()
+                        
+                        # 检查文件名是否匹配危险程序
+                        is_dangerous = False
+                        danger_type = None
+                        
+                        for dangerous in self.dangerous_suid:
+                            # 使用更精确的匹配：完全匹配或前缀匹配
+                            if base_name == dangerous or base_name.startswith(dangerous + '.'):
+                                is_dangerous = True
+                                danger_type = dangerous
+                                break
+                        
+                        # 检查是否有写入权限
+                        has_write_perm = False
+                        if permissions[2] == 'w' or permissions[5] == 'w' or permissions[8] == 'w':
+                            has_write_perm = True
+                            is_dangerous = True
+                        
+                        if is_dangerous:
+                            dangerous_found.append({
+                                'path': file_path,
+                                'permissions': permissions,
+                                'owner': owner,
+                                'danger_type': danger_type,
+                                'has_write_perm': has_write_perm,
+                                'description': self._get_suid_description(file_name, danger_type)
+                            })
+                            
+            except Exception as e:
+                print(f"[-] 检查目录 {suid_dir} 失败: {e}")
                 continue
-            
-            permissions = parts[0]
-            owner = parts[2]
-            file_path = ' '.join(parts[8:])
-            file_name = os.path.basename(file_path)
-            
-            # 检查是否是危险的SUID程序
-            if owner == 'root':
-                # 检查程序名是否在危险列表中
-                base_name = file_name.split('.')[0].lower()
-                
-                # 检查文件名是否匹配危险程序
-                is_dangerous = False
-                danger_type = None
-                
-                for dangerous in self.dangerous_suid:
-                    if dangerous in base_name or base_name in dangerous:
-                        is_dangerous = True
-                        danger_type = dangerous
-                        break
-                
-                # 检查是否有写入权限
-                has_write_perm = False
-                if permissions[2] == 'w' or permissions[5] == 'w' or permissions[8] == 'w':
-                    has_write_perm = True
-                    is_dangerous = True
-                
-                if is_dangerous:
-                    dangerous_found.append({
-                        'path': file_path,
-                        'permissions': permissions,
-                        'owner': owner,
-                        'danger_type': danger_type,
-                        'has_write_perm': has_write_perm,
-                        'description': self._get_suid_description(file_name, danger_type)
-                    })
         
         self.results['suid'] = dangerous_found
         return dangerous_found
@@ -167,34 +269,38 @@ class PrivEscChecker:
         print("[*] 检查cron任务...")
         
         cron_issues = []
+        # 用于去重的集合 - 存储问题的唯一标识
+        seen_issues = set()
         
-        # 检查系统cron目录
-        cron_dirs = [
-            '/etc/crontab',
-            '/etc/cron.d',
-            '/etc/cron.daily',
-            '/etc/cron.hourly',
-            '/etc/cron.weekly',
-            '/etc/cron.monthly',
-            '/var/spool/cron',
-            '/var/spool/cron/crontabs'
-        ]
-        
-        for cron_dir in cron_dirs:
+        for cron_dir in self.cron_dirs:
             if not os.path.exists(cron_dir):
                 continue
             
             if os.path.isfile(cron_dir):
                 # 单个文件
                 issues = self._check_cron_file(cron_dir)
-                cron_issues.extend(issues)
+                for issue in issues:
+                    # 创建唯一标识：文件路径 + 问题类型 + 命令（如果有）
+                    issue_key = f"{issue['path']}:{issue['issue']}:{issue.get('command', '')}"
+                    if issue_key not in seen_issues:
+                        seen_issues.add(issue_key)
+                        cron_issues.append(issue)
             elif os.path.isdir(cron_dir):
                 # 目录，递归检查
                 for root, dirs, files in os.walk(cron_dir):
                     for file in files:
                         file_path = os.path.join(root, file)
+                        # 去重检查
+                        if file_path in self._checked_files:
+                            continue
+                        self._checked_files.add(file_path)
+                        
                         issues = self._check_cron_file(file_path)
-                        cron_issues.extend(issues)
+                        for issue in issues:
+                            issue_key = f"{issue['path']}:{issue['issue']}:{issue.get('command', '')}"
+                            if issue_key not in seen_issues:
+                                seen_issues.add(issue_key)
+                                cron_issues.append(issue)
         
         self.results['cron'] = cron_issues
         return cron_issues
@@ -307,51 +413,65 @@ class PrivEscChecker:
         print("[*] 检查sudo配置...")
         
         sudo_issues = []
-        
-        # 检查sudoers文件权限
-        sudoers_path = '/etc/sudoers'
-        sudoers_d_path = '/etc/sudoers.d'
+        # 用于去重的集合
+        seen_issues = set()
         
         # 检查sudoers文件
-        if os.path.exists(sudoers_path):
+        if os.path.exists(self.sudoers_path):
             try:
-                stat_info = os.stat(sudoers_path)
+                stat_info = os.stat(self.sudoers_path)
                 # sudoers应该是root:root 0440
                 if stat_info.st_mode != 0o100440:
-                    sudo_issues.append({
-                        'path': sudoers_path,
-                        'issue': 'sudoers文件权限错误',
-                        'permissions': oct(stat_info.st_mode)[-3:],
-                        'expected': '0440 (root:root)',
-                        'description': f"sudoers文件权限应为0440(root:root)，当前为{oct(stat_info.st_mode)[-3:]}，可能被篡改"
-                    })
+                    issue_key = f"{self.sudoers_path}:sudoers文件权限错误"
+                    if issue_key not in seen_issues:
+                        seen_issues.add(issue_key)
+                        sudo_issues.append({
+                            'path': self.sudoers_path,
+                            'issue': 'sudoers文件权限错误',
+                            'permissions': oct(stat_info.st_mode)[-3:],
+                            'expected': '0440 (root:root)',
+                            'description': f"sudoers文件权限应为0440(root:root)，当前为{oct(stat_info.st_mode)[-3:]}，可能被篡改"
+                        })
                 
                 if stat_info.st_uid != 0 or stat_info.st_gid != 0:
-                    sudo_issues.append({
-                        'path': sudoers_path,
-                        'issue': 'sudoers文件所有者错误',
-                        'owner': f"{pwd.getpwuid(stat_info.st_uid).pw_name}:{grp.getgrgid(stat_info.st_gid).gr_name}",
-                        'expected': 'root:root',
-                        'description': f"sudoers文件所有者应为root:root，当前配置可能存在安全风险"
-                    })
+                    issue_key = f"{self.sudoers_path}:sudoers文件所有者错误"
+                    if issue_key not in seen_issues:
+                        seen_issues.add(issue_key)
+                        owner_name = pwd.getpwuid(stat_info.st_uid).pw_name if stat_info.st_uid < 65534 else str(stat_info.st_uid)
+                        group_name = grp.getgrgid(stat_info.st_gid).gr_name if stat_info.st_gid < 65534 else str(stat_info.st_gid)
+                        sudo_issues.append({
+                            'path': self.sudoers_path,
+                            'issue': 'sudoers文件所有者错误',
+                            'owner': f"{owner_name}:{group_name}",
+                            'expected': 'root:root',
+                            'description': f"sudoers文件所有者应为root:root，当前配置可能存在安全风险"
+                        })
             except Exception as e:
                 print(f"[-] 检查sudoers文件失败: {e}")
         
         # 检查sudoers.d目录
-        if os.path.exists(sudoers_d_path):
-            for root, dirs, files in os.walk(sudoers_d_path):
+        if os.path.exists(self.sudoers_d_path):
+            for root, dirs, files in os.walk(self.sudoers_d_path):
                 for file in files:
                     file_path = os.path.join(root, file)
+                    # 去重检查
+                    if file_path in self._checked_files:
+                        continue
+                    self._checked_files.add(file_path)
+                    
                     try:
                         stat_info = os.stat(file_path)
                         if stat_info.st_mode != 0o100440:
-                            sudo_issues.append({
-                                'path': file_path,
-                                'issue': 'sudoers.d配置文件权限错误',
-                                'permissions': oct(stat_info.st_mode)[-3:],
-                                'expected': '0440 (root:root)',
-                                'description': f"sudoers.d配置文件权限应为0440(root:root)，当前为{oct(stat_info.st_mode)[-3:]}"
-                            })
+                            issue_key = f"{file_path}:sudoers.d配置文件权限错误"
+                            if issue_key not in seen_issues:
+                                seen_issues.add(issue_key)
+                                sudo_issues.append({
+                                    'path': file_path,
+                                    'issue': 'sudoers.d配置文件权限错误',
+                                    'permissions': oct(stat_info.st_mode)[-3:],
+                                    'expected': '0440 (root:root)',
+                                    'description': f"sudoers.d配置文件权限应为0440(root:root)，当前为{oct(stat_info.st_mode)[-3:]}"
+                                })
                     except Exception:
                         pass
         
@@ -379,28 +499,34 @@ class PrivEscChecker:
                             dangerous_cmds = ['ALL', 'bash', 'sh', 'su', 'sudo', 'vim', 'vi', 'nmap', 'python', 'perl', 'ruby']
                             for cmd in dangerous_cmds:
                                 if cmd in commands.upper() or cmd in commands.lower():
-                                    sudo_issues.append({
-                                        'issue': '危险的sudo NOPASSWD配置',
-                                        'command': commands,
-                                        'description': f"当前用户配置了NOPASSWD: {commands}，无需密码即可执行特权命令，可直接提权"
-                                    })
+                                    issue_key = f"sudo_nopasswd:{commands}"
+                                    if issue_key not in seen_issues:
+                                        seen_issues.add(issue_key)
+                                        sudo_issues.append({
+                                            'issue': '危险的sudo NOPASSWD配置',
+                                            'command': commands,
+                                            'description': f"当前用户配置了NOPASSWD: {commands}，无需密码即可执行特权命令，可直接提权"
+                                        })
                                     break
             
             # 检查是否有ALL权限
             if 'ALL' in output and ('(ALL)' in output or '(root)' in output):
                 if 'NOPASSWD:' not in output:
-                    sudo_issues.append({
-                        'issue': 'sudo ALL权限配置',
-                        'description': "当前用户具有sudo ALL权限，需密码但可能被暴力破解或社会工程利用"
-                    })
+                    issue_key = "sudo_all权限配置"
+                    if issue_key not in seen_issues:
+                        seen_issues.add(issue_key)
+                        sudo_issues.append({
+                            'issue': 'sudo ALL权限配置',
+                            'description': "当前用户具有sudo ALL权限，需密码但可能被暴力破解或社会工程利用"
+                        })
         
         except Exception as e:
             print(f"[-] 检查sudo权限失败: {e}")
         
         # 检查sudoers文件内容（如果可读）
         try:
-            if os.access(sudoers_path, os.R_OK):
-                with open(sudoers_path, 'r') as f:
+            if os.access(self.sudoers_path, os.R_OK):
+                with open(self.sudoers_path, 'r') as f:
                     content = f.read()
                 
                 # 检查是否有危险配置
@@ -416,12 +542,15 @@ class PrivEscChecker:
                 for pattern, desc in dangerous_configs:
                     matches = re.findall(pattern, content, re.MULTILINE)
                     for match in matches:
-                        sudo_issues.append({
-                            'path': sudoers_path,
-                            'issue': '危险的sudoers配置',
-                            'config': match,
-                            'description': f"发现危险配置: {desc}"
-                        })
+                        issue_key = f"{self.sudoers_path}:危险配置:{match}"
+                        if issue_key not in seen_issues:
+                            seen_issues.add(issue_key)
+                            sudo_issues.append({
+                                'path': self.sudoers_path,
+                                'issue': '危险的sudoers配置',
+                                'config': match,
+                                'description': f"发现危险配置: {desc}"
+                            })
         except Exception:
             pass
         
@@ -500,24 +629,6 @@ class PrivEscChecker:
                     'description': "PTRACE_TRACEME漏洞允许非特权用户获取root权限",
                     'severity': '高'
                 })
-            
-            # 检查是否有可用的内核漏洞利用
-            # 检查是否有内核头文件或编译工具（可能用于漏洞利用）
-            try:
-                # 检查gcc是否存在
-                gcc_result = subprocess.run(
-                    ['which', 'gcc'],
-                    capture_output=True, text=True, timeout=5
-                )
-                if gcc_result.returncode == 0:
-                    kernel_issues.append({
-                        'issue': '存在编译工具',
-                        'tool': 'gcc',
-                        'description': "系统安装了gcc编译器，攻击者可编译内核漏洞利用代码",
-                        'severity': '中'
-                    })
-            except Exception:
-                pass
         
         self.results['kernel'] = kernel_issues
         return kernel_issues
