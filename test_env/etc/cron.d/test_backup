@@ -1,0 +1,7 @@
+# 测试用的cron任务 - 包含安全漏洞
+# 漏洞1: 使用相对路径
+*/5 * * * * root backup_script.sh
+# 漏洞2: 使用tar和通配符（可能被路径遍历利用）
+0 2 * * * root tar -czf /tmp/backup.tar.gz /var/www/*
+# 漏洞3: 执行可写目录下的脚本
+30 3 * * * root /tmp/cleanup.sh
