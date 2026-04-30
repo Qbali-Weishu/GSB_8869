@@ -1,0 +1,3 @@
+#!/bin/bash
+echo "This is a mock vim for testing SUID vulnerabilities"
+echo "Real vim with SUID can be exploited via :!command"

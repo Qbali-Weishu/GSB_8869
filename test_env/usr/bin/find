@@ -1,0 +1,3 @@
+#!/bin/bash
+echo "This is a mock find for testing SUID vulnerabilities"
+echo "Real find with SUID can be exploited via -exec"

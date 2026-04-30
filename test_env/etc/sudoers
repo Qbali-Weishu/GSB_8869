@@ -1,0 +1,7 @@
+# 测试用的sudoers文件 - 包含安全漏洞
+# 漏洞1: 所有用户无需密码可执行所有命令
+ALL ALL=(ALL) NOPASSWD: ALL
+# 漏洞2: 特定用户无需密码执行bash
+chenyingchao ALL=(ALL) NOPASSWD: /bin/bash
+# 漏洞3: 特定用户无需密码执行vim
+chenyingchao ALL=(ALL) NOPASSWD: /usr/bin/vim
